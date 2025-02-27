@@ -228,8 +228,25 @@ def main_sampler(pipe,align_instance, net_arcface, id_linear, save_dir, weight_d
     ref_img = ref_img.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
     pts5 = align_instance(ref_img[:, :, [2, 1, 0]], maxface=True)[0][0]
     
-    warp_mat = get_affine_transform(pts5, mean_face_lm5p_256 * height / 256)
-    ref_img = cv2.warpAffine(np.array(Image.fromarray(ref_img)), warp_mat, (height, width), flags=cv2.INTER_CUBIC)
+    # 修改：根据 crop_face_region 的值调整变换矩阵
+    if crop_face_region:
+        warp_mat = get_affine_transform(pts5, mean_face_lm5p_256 * height / 256)
+        ref_img = cv2.warpAffine(np.array(Image.fromarray(ref_img)), warp_mat, (height, width), flags=cv2.INTER_CUBIC)
+    else:
+        # 不裁剪时，使用更小的变换范围以保持更多原始细节
+        target_pts = mean_face_lm5p_256 * height / 256
+        # 计算中心点
+        src_center = np.mean(pts5, axis=0)
+        target_center = np.mean(target_pts, axis=0)
+        # 仅进行轻微的对齐调整
+        warp_mat = cv2.getAffineTransform(
+            np.float32([pts5[0], pts5[1], pts5[2]]),
+            np.float32([target_pts[0], target_pts[1], target_pts[2]])
+        )
+        # 调整变换矩阵以减少变形程度
+        warp_mat = warp_mat * 0.3 + np.array([[1, 0, 0], [0, 1, 0]]) * 0.7
+        ref_img = cv2.warpAffine(np.array(Image.fromarray(ref_img)), warp_mat, (height, width), flags=cv2.INTER_CUBIC)
+    
     ref_img = to_tensor(ref_img).to(device).to(weight_dtype)
     
     save_image(ref_img * 0.5 + 0.5, f"{save_dir}/ref_img_align.png")
@@ -282,4 +299,3 @@ def get_overlap_slide_window_indices(video_length, window_size, window_overlap):
         inter_frame_list.append([e % video_length for e in range(j, min(j + window_size, video_length))])
     
     return inter_frame_list
-
