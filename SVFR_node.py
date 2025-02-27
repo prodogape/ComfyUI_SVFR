@@ -5,8 +5,8 @@ import os
 import torch
 from .infer import main_loader,main_sampler
 from .node_utils import nomarl_upscale,tensor_upscale
-
 import folder_paths
+import cv2
 
 MAX_SEED = np.iinfo(np.int32).max
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
@@ -102,8 +102,8 @@ class SVFR_Sampler:
                          },
         }
     
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("images",)
+    RETURN_TYPES = ("IMAGE", "BBOX_INFO")
+    RETURN_NAMES = ("images", "bbox_info")
     FUNCTION = "sampler_main"
     CATEGORY = "SVFR"
     
@@ -116,6 +116,7 @@ class SVFR_Sampler:
         align_instance = model.get("align_instance")
         weight_dtype = model.get("weight_dtype")
         mask=kwargs.get("mask")
+        bbox_info = None
         
         if isinstance(mask,torch.Tensor): #缩放至图片尺寸
             if mask.shape[-1]==64 and mask.shape[-2]==64:
@@ -153,6 +154,25 @@ class SVFR_Sampler:
         
         print("******** start infer *********")
         
+        if crop_face_region:
+            # Store face detection results for later use
+            bbox_list = []
+            frame_interval = 5
+            for frame_count, drive_idx in enumerate(drive_idx_list):
+                if frame_count % frame_interval != 0:
+                    continue  
+                frame = np.array(input_frames_pil[drive_idx])
+                _, _, bboxes_list = align_instance(frame[:,:,[2,1,0]], maxface=True)
+                if bboxes_list==[]:
+                    continue
+                x1, y1, ww, hh = bboxes_list[0]
+                x2, y2 = x1 + ww, y1 + hh
+                bbox = [x1, y1, x2, y2]
+                bbox_list.append(bbox)
+            bbox = get_union_bbox(bbox_list)
+            bbox_s = process_bbox(bbox, expand_radio=0.4, height=frame.shape[0], width=frame.shape[1])
+            bbox_info = (bbox_s, frame.shape[0], frame.shape[1])
+        
         images=main_sampler(pipe, align_instance, net_arcface, id_linear, folder_paths.get_output_directory(), weight_dtype,
                           seed,input_frames_pil,task_ids,mask_array,save_video,decode_chunk_size,noise_aug_strength,
                           min_appearance_guidance_scale,max_appearance_guidance_scale,
@@ -160,7 +180,7 @@ class SVFR_Sampler:
         
         #model.to("cpu")#显存不会自动释放，手动迁移，不然很容易OOM
         torch.cuda.empty_cache()
-        return (images,)
+        return (images, bbox_info)
 
 
 class SVFR_img2mask:
@@ -197,14 +217,72 @@ class SVFR_img2mask:
         return (torch.from_numpy(out).unsqueeze(0),)
 
 
+class SVFR_Combine:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "original_frames": ("IMAGE",),  # Original video frames
+                "processed_faces": ("IMAGE",),  # Processed face regions (square faces)
+                "bbox_info": ("BBOX_INFO",),    # Bounding box information from SVFR_Sampler
+            }
+        }
+    
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("combined_frames",)
+    FUNCTION = "combine_faces"
+    CATEGORY = "SVFR"
+
+    def combine_faces(self, original_frames, processed_faces, bbox_info):
+        if bbox_info is None:
+            return (processed_faces,)
+            
+        bbox_s, orig_height, orig_width = bbox_info
+        x1, y1, x2, y2 = [int(x) for x in bbox_s]
+        face_region_height = y2 - y1
+        face_region_width = x2 - x1
+        
+        # Convert tensors to numpy for processing
+        orig_frames = original_frames.cpu().numpy()
+        proc_faces = processed_faces.cpu().numpy()  # This contains square faces
+        
+        # Create output array
+        output_frames = orig_frames.copy()
+        
+        for i in range(len(output_frames)):
+            # Get current frames
+            orig_frame = output_frames[i]
+            proc_face = proc_faces[i]
+            
+            # 首先将方形人脸缩放到目标区域大小
+            face_resized = cv2.resize(proc_face, (face_region_width, face_region_height))
+            
+            # 创建一个与人脸区域大小相同的遮罩
+            mask = np.ones((face_region_height, face_region_width, 3)) * 255
+            # 使用较大的核来创建平滑的边缘过渡
+            kernel_size = min(31, face_region_height//4 * 2 + 1)  # 确保核大小是奇数
+            kernel_size = max(3, kernel_size)  # 确保至少是3
+            mask_blur = cv2.GaussianBlur(mask, (kernel_size, kernel_size), 0)
+            mask_blur = mask_blur / 255.0
+            
+            # 将调整后的人脸区域混合回原始帧
+            orig_frame[y1:y2, x1:x2] = \
+                orig_frame[y1:y2, x1:x2] * (1 - mask_blur) + \
+                face_resized * mask_blur
+        
+        # Convert back to tensor
+        return (torch.from_numpy(output_frames),)
+
+
 NODE_CLASS_MAPPINGS = {
     "SVFR_LoadModel": SVFR_LoadModel,
     "SVFR_Sampler": SVFR_Sampler,
     "SVFR_img2mask":SVFR_img2mask,
-    
+    "SVFR_Combine": SVFR_Combine,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SVFR_LoadModel": "SVFR_LoadModel",
     "SVFR_Sampler": "SVFR_Sampler",
-    "SVFR_img2mask":"SVFR_img2mask"
+    "SVFR_img2mask":"SVFR_img2mask",
+    "SVFR_Combine": "SVFR_Combine",
 }
