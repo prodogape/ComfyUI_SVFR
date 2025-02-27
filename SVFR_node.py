@@ -173,8 +173,19 @@ class SVFR_Sampler:
             
             # 获取所有检测到的人脸框的并集
             bbox = get_union_bbox(bbox_list)
-            # 处理边界框，添加一定的边距
-            bbox_s = process_bbox(bbox, expand_radio=0.4, height=frame.shape[0], width=frame.shape[1])
+            
+            # 扩展边界框
+            bbox_h = bbox[3] - bbox[1]
+            bbox_w = bbox[2] - bbox[0]
+            expand_ratio = 0.4
+            
+            # 扩展时保持原始宽高比
+            expand_x1 = max(bbox[0] - expand_ratio * bbox_w, 0)
+            expand_y1 = max(bbox[1] - expand_ratio * bbox_h, 0)
+            expand_x2 = min(bbox[2] + expand_ratio * bbox_w, frame.shape[1])
+            expand_y2 = min(bbox[3] + expand_ratio * bbox_h, frame.shape[0])
+            
+            bbox_s = [expand_x1, expand_y1, expand_x2, expand_y2]
             bbox_info = (bbox_s, frame.shape[0], frame.shape[1])
         
         images=main_sampler(pipe, align_instance, net_arcface, id_linear, folder_paths.get_output_directory(), weight_dtype,
@@ -279,19 +290,12 @@ class SVFR_Combine:
         for i in range(len(original_frames)):
             # 将处理后的人脸缩放到目标大小
             face = processed_faces[i]
-            if face.shape[0] != face_region_height or face.shape[1] != face_region_width:
-                # 调整大小
-                face = torch.nn.functional.interpolate(
-                    face.permute(2, 0, 1).unsqueeze(0),  # [1,C,H,W]
-                    size=(face_region_height, face_region_width),
-                    mode='bilinear',
-                    align_corners=False
-                ).squeeze(0).permute(1, 2, 0)  # [H,W,C]
+            face_cropped = face[:, y1:y2, x1:x2] if len(face.shape) == 3 else face[y1:y2, x1:x2]
             
             # 应用遮罩并混合
             output_frames[i, y1:y2, x1:x2] = \
                 output_frames[i, y1:y2, x1:x2] * (1 - mask) + \
-                face * mask
+                face_cropped * mask
         
         return (output_frames,)
 
