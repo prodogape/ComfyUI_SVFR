@@ -226,8 +226,8 @@ class SVFR_Combine:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "original_frames": ("IMAGE",),  # Original video frames
-                "processed_faces": ("IMAGE",),  # Processed face regions (square faces)
+                "original_frames": ("IMAGE",),  # Original video frames [B,H,W,C]
+                "processed_faces": ("IMAGE",),  # Processed face regions from SVFR_Sampler
                 "bbox_info": ("BBOX_INFO",),    # Bounding box information from SVFR_Sampler
             }
         }
@@ -243,39 +243,56 @@ class SVFR_Combine:
             
         bbox_s, orig_height, orig_width = bbox_info
         x1, y1, x2, y2 = [int(x) for x in bbox_s]
+        
+        # 确保边界框在有效范围内
+        x1 = max(0, x1)
+        x2 = min(x2, original_frames.shape[2])
+        y1 = max(0, y1)
+        y2 = min(y2, original_frames.shape[1])
+        
         face_region_height = y2 - y1
         face_region_width = x2 - x1
         
-        # Convert tensors to numpy for processing
-        orig_frames = original_frames.cpu().numpy()
-        proc_faces = processed_faces.cpu().numpy()  # This contains square faces
+        # 创建输出张量
+        output_frames = original_frames.clone()
         
-        # Create output array
-        output_frames = orig_frames.copy()
+        # 创建平滑过渡遮罩
+        feather = min(face_region_height, face_region_width) // 8
+        feather = max(5, min(feather, 40))  # 限制羽化范围
         
-        for i in range(len(output_frames)):
-            # Get current frames
-            orig_frame = output_frames[i]
-            proc_face = proc_faces[i]
-            
-            # 首先将方形人脸缩放到目标区域大小
-            face_resized = cv2.resize(proc_face, (face_region_width, face_region_height))
-            
-            # 创建一个与人脸区域大小相同的遮罩
-            mask = np.ones((face_region_height, face_region_width, 3)) * 255
-            # 使用较大的核来创建平滑的边缘过渡
-            kernel_size = min(31, face_region_height//4 * 2 + 1)  # 确保核大小是奇数
-            kernel_size = max(3, kernel_size)  # 确保至少是3
-            mask_blur = cv2.GaussianBlur(mask, (kernel_size, kernel_size), 0)
-            mask_blur = mask_blur / 255.0
-            
-            # 将调整后的人脸区域混合回原始帧
-            orig_frame[y1:y2, x1:x2] = \
-                orig_frame[y1:y2, x1:x2] * (1 - mask_blur) + \
-                face_resized * mask_blur
+        y, x = np.ogrid[:face_region_height, :face_region_width]
+        edge_mask = np.ones((face_region_height, face_region_width))
         
-        # Convert back to tensor
-        return (torch.from_numpy(output_frames),)
+        # 创建渐变边缘
+        edge_mask = np.minimum(edge_mask, x / feather)  # 左边缘
+        edge_mask = np.minimum(edge_mask, (face_region_width - 1 - x) / feather)  # 右边缘
+        edge_mask = np.minimum(edge_mask, y / feather)  # 上边缘
+        edge_mask = np.minimum(edge_mask, (face_region_height - 1 - y) / feather)  # 下边缘
+        edge_mask = np.clip(edge_mask, 0, 1)
+        
+        # 应用高斯模糊
+        edge_mask = cv2.GaussianBlur(edge_mask, (0, 0), feather/3)
+        mask = torch.from_numpy(edge_mask).float().to(original_frames.device)
+        mask = mask.unsqueeze(-1).expand(-1, -1, 3)  # 扩展到3通道
+        
+        # 处理每一帧
+        for i in range(len(original_frames)):
+            # 将处理后的人脸缩放到目标大小
+            face = processed_faces[i]
+            if face.shape[0] != face_region_height or face.shape[1] != face_region_width:
+                face = torch.nn.functional.interpolate(
+                    face.unsqueeze(0).permute(0, 2, 1),  # [1,C,H,W]
+                    size=(face_region_height, face_region_width),
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze(0).permute(1, 0)  # [H,W,C]
+            
+            # 应用遮罩并混合
+            output_frames[i, y1:y2, x1:x2] = \
+                output_frames[i, y1:y2, x1:x2] * (1 - mask) + \
+                face * mask
+        
+        return (output_frames,)
 
 
 NODE_CLASS_MAPPINGS = {
