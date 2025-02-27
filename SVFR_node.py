@@ -158,10 +158,8 @@ class SVFR_Sampler:
             # Store face detection results for later use
             bbox_list = []
             frame_interval = 5
-            for frame_count, drive_idx in enumerate(drive_idx_list):
-                if frame_count % frame_interval != 0:
-                    continue  
-                frame = np.array(input_frames_pil[drive_idx])
+            for frame_idx in range(0, video_len, frame_interval):
+                frame = np.array(input_frames_pil[frame_idx])
                 _, _, bboxes_list = align_instance(frame[:,:,[2,1,0]], maxface=True)
                 if bboxes_list==[]:
                     continue
@@ -169,6 +167,8 @@ class SVFR_Sampler:
                 x2, y2 = x1 + ww, y1 + hh
                 bbox = [x1, y1, x2, y2]
                 bbox_list.append(bbox)
+            if not bbox_list:  # 如果没有检测到任何人脸
+                raise "No face detected in the video frames!"
             bbox = get_union_bbox(bbox_list)
             bbox_s = process_bbox(bbox, expand_radio=0.4, height=frame.shape[0], width=frame.shape[1])
             bbox_info = (bbox_s, frame.shape[0], frame.shape[1])
