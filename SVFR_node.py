@@ -5,6 +5,7 @@ import os
 import torch
 from .infer import main_loader,main_sampler
 from .node_utils import nomarl_upscale,tensor_upscale
+from .src.dataset.dataset import get_union_bbox, process_bbox, mean_face_lm5p_256
 import folder_paths
 import cv2
 
@@ -169,7 +170,10 @@ class SVFR_Sampler:
                 bbox_list.append(bbox)
             if not bbox_list:  # 如果没有检测到任何人脸
                 raise "No face detected in the video frames!"
+            
+            # 获取所有检测到的人脸框的并集
             bbox = get_union_bbox(bbox_list)
+            # 处理边界框，添加一定的边距
             bbox_s = process_bbox(bbox, expand_radio=0.4, height=frame.shape[0], width=frame.shape[1])
             bbox_info = (bbox_s, frame.shape[0], frame.shape[1])
         
