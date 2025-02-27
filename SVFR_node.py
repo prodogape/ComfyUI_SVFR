@@ -280,12 +280,13 @@ class SVFR_Combine:
             # 将处理后的人脸缩放到目标大小
             face = processed_faces[i]
             if face.shape[0] != face_region_height or face.shape[1] != face_region_width:
+                # 调整大小
                 face = torch.nn.functional.interpolate(
-                    face.unsqueeze(0).permute(0, 2, 1),  # [1,C,H,W]
+                    face.permute(2, 0, 1).unsqueeze(0),  # [1,C,H,W]
                     size=(face_region_height, face_region_width),
                     mode='bilinear',
                     align_corners=False
-                ).squeeze(0).permute(1, 0)  # [H,W,C]
+                ).squeeze(0).permute(1, 2, 0)  # [H,W,C]
             
             # 应用遮罩并混合
             output_frames[i, y1:y2, x1:x2] = \
